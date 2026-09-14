@@ -1,0 +1,23 @@
+// LaTeX Workshop settings written by latex-tools.
+// Replace <TEXBIN> with your TeX Live bin directory, e.g.
+//   /Users/<you>/texlive/2026/bin/universal-darwin
+// Merge these keys into your own settings.json - do not replace the file.
+{
+    "latex-workshop.latex.tools": [
+        { "name": "latexmk", "command": "latexmk",
+          "args": ["-synctex=1","-interaction=nonstopmode","-file-line-error","-pdf","-outdir=%OUTDIR%","%DOC%"],
+          "env": { "PATH": "<TEXBIN>:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" } },
+        { "name": "pdflatex", "command": "pdflatex",
+          "args": ["-synctex=1","-interaction=nonstopmode","-file-line-error","%DOC%"],
+          "env": { "PATH": "<TEXBIN>:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" } },
+        { "name": "bibtex", "command": "bibtex", "args": ["%DOCFILE%"],
+          "env": { "PATH": "<TEXBIN>:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" } }
+    ],
+    "latex-workshop.latex.recipes": [
+        { "name": "latexmk (recommended)", "tools": ["latexmk"] },
+        { "name": "pdflatex -> bibtex -> pdflatex x2", "tools": ["pdflatex","bibtex","pdflatex","pdflatex"] }
+    ],
+    "latex-workshop.view.pdf.viewer": "tab",
+    "latex-workshop.latex.autoBuild.run": "onSave",
+    "latex-workshop.latex.autoClean.run": "never"
+}

@@ -1,0 +1,568 @@
+#!/usr/bin/env bash
+#
+# paperdiff — compare two versions of a LaTeX paper that uses a nested
+#             \input{} structure, and report figure changes.
+#
+#   paperdiff OLD_DIR NEW_DIR [options]
+#
+# Colours are configurable: --new-color / --old-color (hex or xcolor name).
+# Defaults: added&replaced = 00CF39 (green), deleted = red.
+#
+# Produces, in the output directory:
+#   diff.pdf            the marked-up paper (struck-through = removed,
+#                       underlined = added)
+#   diff.tex            the flattened, marked-up source
+#   figures-report.txt  figures added / removed / modified
+#   bib-report.txt      bibliography entries added / removed / modified
+#   tables-report.txt   table changes (latexdiff cannot show these in the PDF)
+#   figure-diffs/       side-by-side + heat-map PNGs   (only with --images)
+#   work/               the scratch build tree
+#
+# NEITHER SOURCE DIRECTORY IS EVER MODIFIED. Everything happens in a copy.
+# The nested layout is left exactly as it is: latexdiff --flatten expands
+# \input{} recursively in memory, it does not rewrite your files.
+#
+# Written for Ian Baeza, 2026-09-10.
+
+set -uo pipefail
+
+# --- TeX Live (user-local install) --------------------------------------
+TEXBIN="$HOME/texlive/2026/bin/universal-darwin"
+[ -d "$TEXBIN" ] && case ":$PATH:" in *":$TEXBIN:"*) ;; *) PATH="$PATH:$TEXBIN";; esac
+export PATH
+
+PYTHON=/opt/miniconda3/bin/python
+[ -x "$PYTHON" ] || PYTHON=$(command -v python3)
+
+# --- defaults -----------------------------------------------------------
+OUTDIR="$PWD/paperdiff-out"
+MAIN=""
+LDTYPE="UNDERLINE"
+MATH="coarse"
+NEWCOLOR="00CF39"     # added / replacement text  (green)
+OLDCOLOR="red"        # deleted / previous text   (red)
+DOCOMPILE=1
+FIGSONLY=0
+MKIMAGES=0
+OPENPDF=0
+DOBIB=1
+EXTRA_LD=()
+
+usage() {
+  cat <<'EOF'
+paperdiff — diff two versions of a nested LaTeX paper (+ compare figures)
+
+USAGE
+  paperdiff OLD_DIR NEW_DIR [options]
+
+OPTIONS
+  -o DIR            output directory            (default ./paperdiff-out)
+  -m FILE           main .tex relative to each root (default: auto-detect)
+  -t TYPE           latexdiff markup style: UNDERLINE (default), CFONT,
+                    CCHANGEBAR, BOLD, PDFCOMMENT ...
+  --math MODE       whole | coarse (default) | fine
+                      use "whole" if heavy math breaks the diff build
+  --new-color C     colour of ADDED / REPLACED text   (default 00CF39, green)
+  --old-color C     colour of DELETED / PREVIOUS text (default red)
+                      C is either an HTML hex code -- 00CF39, #00CF39 --
+                      or any xcolor name: red green blue cyan magenta yellow
+                      orange violet purple brown teal olive black gray
+                      (aliases: --add-color / --del-color)
+  --no-bib          skip building each version's .bbl. Faster, but then the
+                    REFERENCE LIST itself is not marked up (latexdiff can only
+                    diff a bibliography that has been expanded to a .bbl)
+  --no-compile      write diff.tex but do not run LaTeX
+  --figures-only    only compare figures/bibliography, skip the LaTeX diff
+  --images          also render side-by-side + heat-map PNGs of changed figures
+  --open            open diff.pdf when finished
+  --ld OPT          pass an extra raw option straight to latexdiff
+                    (repeatable, e.g. --ld --disable-citation-markup)
+  -h, --help        this message
+
+EXAMPLES
+  paperdiff ~/Downloads/aa62334-26/Mass_Loss_Flames_data_paper \
+            ~/Downloads/Mass_Loss_Flames_data_paper
+
+  paperdiff old new -o ~/Desktop/referee-diff --images --open
+
+  # custom colours
+  paperdiff old new --new-color 00CF39 --old-color red      # the default
+  paperdiff old new --new-color teal --old-color magenta
+  paperdiff old new --new-color '#1B7F3B' --old-color 'B00020'
+
+  # if a table or equation makes the diff fail to compile:
+  paperdiff old new --math whole --ld --disable-citation-markup
+EOF
+}
+
+# --- args ---------------------------------------------------------------
+POS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) OUTDIR="$2"; shift 2;;
+    -m) MAIN="$2"; shift 2;;
+    -t) LDTYPE="$2"; shift 2;;
+    --math) MATH="$2"; shift 2;;
+    --new-color|--new-colour|--add-color|--add-colour) NEWCOLOR="$2"; shift 2;;
+    --old-color|--old-colour|--del-color|--del-colour) OLDCOLOR="$2"; shift 2;;
+    --no-bib) DOBIB=0; shift;;
+    --no-compile) DOCOMPILE=0; shift;;
+    --figures-only) FIGSONLY=1; shift;;
+    --images) MKIMAGES=1; shift;;
+    --open) OPENPDF=1; shift;;
+    --ld) EXTRA_LD+=("$2"); shift 2;;
+    -h|--help) usage; exit 0;;
+    -*) echo "paperdiff: unknown option '$1' (try --help)" >&2; exit 2;;
+    *) POS+=("$1"); shift;;
+  esac
+done
+
+if [ "${#POS[@]}" -ne 2 ]; then usage; exit 2; fi
+OLD=$(cd "${POS[0]}" 2>/dev/null && pwd) || { echo "paperdiff: cannot read OLD dir '${POS[0]}'" >&2; exit 1; }
+NEW=$(cd "${POS[1]}" 2>/dev/null && pwd) || { echo "paperdiff: cannot read NEW dir '${POS[1]}'" >&2; exit 1; }
+
+for t in latexdiff latexmk pdflatex; do
+  command -v "$t" >/dev/null || { echo "paperdiff: '$t' not found on PATH." >&2; exit 1; }
+done
+
+# --- find the main .tex (the one with \documentclass AND \begin{document})
+detect_main() {
+  local root="$1" f base hits=()
+  while IFS= read -r f; do
+    grep -q '\\documentclass' "$f" 2>/dev/null || continue
+    grep -q '\\begin{document}' "$f" 2>/dev/null && hits+=("$(basename "$f")")
+  done < <(find "$root" -maxdepth 1 -name '*.tex' | sort)
+  [ "${#hits[@]}" -eq 1 ] && { echo "${hits[0]}"; return 0; }
+  for base in aanda.tex main.tex paper.tex ms.tex manuscript.tex; do
+    for f in ${hits[@]+"${hits[@]}"}; do [ "$f" = "$base" ] && { echo "$base"; return 0; }; done
+  done
+  return 1
+}
+
+if [ -z "$MAIN" ]; then
+  MAIN=$(detect_main "$NEW") || {
+    echo "paperdiff: could not decide which .tex is the main file in" >&2
+    echo "  $NEW" >&2
+    echo "Candidates:" >&2; find "$NEW" -maxdepth 1 -name '*.tex' -exec basename {} \; | sed 's/^/  /' >&2
+    echo "Pass it explicitly:  paperdiff OLD NEW -m <file.tex>" >&2
+    exit 1; }
+fi
+[ -f "$OLD/$MAIN" ] || { echo "paperdiff: '$MAIN' not found in OLD dir $OLD" >&2; exit 1; }
+[ -f "$NEW/$MAIN" ] || { echo "paperdiff: '$MAIN' not found in NEW dir $NEW" >&2; exit 1; }
+
+mkdir -p "$OUTDIR" || exit 1
+OUTDIR=$(cd "$OUTDIR" && pwd)
+
+echo "paperdiff"
+echo "  old  : $OLD"
+echo "  new  : $NEW"
+echo "  main : $MAIN"
+echo "  out  : $OUTDIR"
+echo
+
+# ========================= 1. LaTeX diff ================================
+if [ "$FIGSONLY" -eq 0 ]; then
+  W="$OUTDIR/work"
+  rm -rf "$W"; mkdir -p "$W"
+  # Union of both trees, NEW winning. This makes figures that exist only in
+  # the OLD version still resolve, so the diff document always compiles.
+  rsync -a "$NEW/" "$W/"
+  rsync -a --ignore-existing "$OLD/" "$W/"
+
+  case "$MATH" in
+    whole)  MM="whole";;
+    fine)   MM="fine";;
+    *)      MM="coarse";;
+  esac
+
+  # --- build each version's .bbl -----------------------------------------
+  # latexdiff can only mark up the REFERENCE LIST if it can flatten a .bbl.
+  # Without this the bibliography is regenerated from the new .bib and shows
+  # no markup at all. Built inside our copies; the sources stay untouched.
+  SRCOLD="$OLD"; SRCNEW="$NEW"
+  JOB="${MAIN%.tex}"
+  if [ "$DOBIB" -eq 1 ] && grep -qE '\\(bibliography|addbibresource)' "$NEW/$MAIN" 2>/dev/null; then
+    echo "==> building .bbl for both versions (so the reference list is diffed too)"
+    WOLD="$OUTDIR/work-old"; rm -rf "$WOLD"; mkdir -p "$WOLD"
+    rsync -a "$OLD/" "$WOLD/"
+    for d in "$WOLD" "$W"; do
+      ( cd "$d" || exit
+        pdflatex -draftmode -interaction=nonstopmode "$MAIN" >/dev/null 2>&1
+        if grep -q '\\addbibresource' "$MAIN" 2>/dev/null; then
+          biber "$JOB" >/dev/null 2>&1
+        else
+          bibtex "$JOB" >/dev/null 2>&1
+        fi )
+    done
+    if [ -s "$WOLD/$JOB.bbl" ] && [ -s "$W/$JOB.bbl" ]; then
+      SRCOLD="$WOLD"; SRCNEW="$W"
+      echo "    ok ($(wc -l < "$WOLD/$JOB.bbl" | tr -d ' ') -> $(wc -l < "$W/$JOB.bbl" | tr -d ' ') lines) - reference list will be marked up"
+    else
+      echo "    could not build .bbl; the reference list will NOT be marked up"
+    fi
+  fi
+
+  echo "==> running latexdiff (--flatten, type=$LDTYPE, math=$MM)"
+  latexdiff --flatten --type="$LDTYPE" --math-markup="$MM" \
+            ${EXTRA_LD[@]+"${EXTRA_LD[@]}"} \
+            "$SRCOLD/$MAIN" "$SRCNEW/$MAIN" > "$W/diff.tex" 2> "$OUTDIR/latexdiff.log"
+  LDRC=$?
+  if [ $LDRC -ne 0 ] || [ ! -s "$W/diff.tex" ]; then
+    echo "    latexdiff FAILED (exit $LDRC). See $OUTDIR/latexdiff.log" >&2
+    sed 's/^/      /' "$OUTDIR/latexdiff.log" >&2
+    exit 1
+  fi
+  # --- recolour the markup ------------------------------------------------
+  # latexdiff hardcodes blue (added) and red (deleted) in its preamble block.
+  # Rewrite those to user-chosen colours. Only lines tagged %DIF PREAMBLE are
+  # touched, so the body of the paper is never modified.
+  "$PYTHON" - "$W/diff.tex" "$NEWCOLOR" "$OLDCOLOR" <<'PYCOL'
+import sys, re
+path, newc, oldc = sys.argv[1], sys.argv[2], sys.argv[3]
+
+# the 19 colours xcolor always defines (dvipsnames etc. need extra options)
+BASE = {"red","green","blue","cyan","magenta","yellow","black","white","gray",
+        "darkgray","lightgray","brown","lime","olive","orange","pink","purple",
+        "teal","violet"}
+
+def spec(name, value):
+    v = value.strip().lstrip('#')
+    if re.fullmatch(r'[0-9A-Fa-f]{6}', v):
+        return "\\definecolor{%s}{HTML}{%s}" % (name, v.upper())
+    if re.fullmatch(r'[0-9A-Fa-f]{3}', v):          # 0C3 -> 00CC33
+        return "\\definecolor{%s}{HTML}{%s}" % (name, ''.join(c*2 for c in v).upper())
+    # an xcolor name, optionally blended:  red  |  red!60  |  red!60!black
+    parts = v.split('!')
+    ok = bool(parts) and all(
+        (p.lower() in BASE) if i % 2 == 0 else re.fullmatch(r'\d{1,3}', p)
+        for i, p in enumerate(parts))
+    if not ok:
+        sys.stderr.write(
+            "paperdiff: cannot understand the colour '%s'.\n"
+            "  Use a 6-digit hex code (e.g. 00CF39 or #00CF39),\n"
+            "  or one of: %s,\n"
+            "  optionally blended, e.g. red!60 or blue!40!black.\n"
+            % (value, " ".join(sorted(BASE))))
+        sys.exit(3)
+    return "\\colorlet{%s}{%s}" % (name, v)
+
+defs = [spec("DIFaddcolor", newc), spec("DIFdelcolor", oldc)]
+
+lines = open(path, encoding='utf-8', errors='replace').read().split('\n')
+out, inserted = [], False
+for ln in lines:
+    if '%DIF PREAMBLE' in ln:
+        # xcolor (superset of color) so that HTML hex codes are available
+        ln = ln.replace('\\RequirePackage{color}', '\\RequirePackage{xcolor}')
+        ln = ln.replace('\\color{blue}', '\\color{DIFaddcolor}')
+        ln = ln.replace('\\color{red}',  '\\color{DIFdelcolor}')
+        out.append(ln)
+        if not inserted and '\\RequirePackage{xcolor}' in ln:
+            out += [d + ' %DIF PREAMBLE' for d in defs]
+            inserted = True
+        continue
+    out.append(ln)
+
+if not inserted:   # unusual --type: fall back to injecting a block of our own
+    for i, ln in enumerate(out):
+        if 'PREAMBLE EXTENSION ADDED BY LATEXDIFF' in ln:
+            out[i+1:i+1] = ['\\RequirePackage{xcolor} %DIF PREAMBLE'] + \
+                           [d + ' %DIF PREAMBLE' for d in defs]
+            inserted = True
+            break
+
+open(path, 'w', encoding='utf-8').write('\n'.join(out))
+print("    colours: added/replaced = %s   deleted = %s%s"
+      % (newc, oldc, "" if inserted else "   (WARNING: could not patch preamble)"))
+PYCOL
+  [ $? -eq 3 ] && exit 3
+
+  cp "$W/diff.tex" "$OUTDIR/diff.tex"
+  ADDN=$(grep -c 'DIFadd' "$W/diff.tex" 2>/dev/null || echo 0)
+  DELN=$(grep -c 'DIFdel' "$W/diff.tex" 2>/dev/null || echo 0)
+  echo "    diff.tex written ($(wc -l < "$W/diff.tex" | tr -d ' ') lines, ${ADDN} add / ${DELN} del markers)"
+  # latexdiff warns about .bbl when it cannot flatten the bibliography; harmless.
+  grep -q 'cannot be found' "$OUTDIR/latexdiff.log" 2>/dev/null && \
+    echo "    note: bibliography not flattened (normal) - reference list itself is not diffed"
+
+  if [ "$DOCOMPILE" -eq 1 ]; then
+    echo "==> compiling diff.pdf"
+    ( cd "$W" && latexmk -pdf -interaction=nonstopmode diff.tex > "$OUTDIR/build.log" 2>&1 )
+    if [ -f "$W/diff.pdf" ]; then
+      cp "$W/diff.pdf" "$OUTDIR/diff.pdf"
+      PAGES=$(grep -o 'diff.pdf ([0-9]* pages' "$W/diff.log" 2>/dev/null | grep -o '[0-9]*' | head -1)
+      echo "    diff.pdf  (${PAGES:-?} pages)  ->  $OUTDIR/diff.pdf"
+    else
+      echo "    COMPILE FAILED. First errors:" >&2
+      grep -E '^!' -A4 "$W/diff.log" 2>/dev/null | head -30 | sed 's/^/      /' >&2
+      echo "      full log: $OUTDIR/build.log" >&2
+      echo "      tip: retry with  --math whole  or  --ld --disable-citation-markup" >&2
+    fi
+  fi
+  echo
+fi
+
+# ================= 2. figures + bibliography report ======================
+echo "==> comparing figures and bibliography"
+"$PYTHON" - "$OLD" "$NEW" "$OUTDIR" "$MKIMAGES" <<'PYEOF'
+import sys, os, re, hashlib
+old, new, outdir, mkimages = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4] == "1"
+
+IMG = {'.png', '.jpg', '.jpeg', '.pdf', '.eps', '.ps', '.gif', '.tif', '.tiff'}
+
+def walk(root, exts):
+    out = {}
+    for dp, dirs, fs in os.walk(root):
+        dirs[:] = [d for d in dirs if d not in ('.git', 'paperdiff-out', 'work')]
+        for f in fs:
+            if os.path.splitext(f)[1].lower() in exts:
+                out[os.path.relpath(os.path.join(dp, f), root)] = os.path.join(dp, f)
+    return out
+
+def sha(p):
+    h = hashlib.sha256()
+    with open(p, 'rb') as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b''):
+            h.update(chunk)
+    return h.hexdigest()
+
+O, N = walk(old, IMG), walk(new, IMG)
+added   = sorted(set(N) - set(O))
+removed = sorted(set(O) - set(N))
+common  = sorted(set(O) & set(N))
+changed, identical = [], []
+for r in common:
+    (identical if sha(O[r]) == sha(N[r]) else changed).append(r)
+
+lines = []
+w = lines.append
+w("FIGURE REPORT")
+w("=" * 60)
+w(f"old: {old}")
+w(f"new: {new}")
+w("")
+w(f"ADDED    ({len(added)})")
+for r in added:   w(f"    + {r}")
+if not added: w("    (none)")
+w("")
+w(f"REMOVED  ({len(removed)})")
+for r in removed: w(f"    - {r}")
+if not removed: w("    (none)")
+w("")
+w(f"MODIFIED ({len(changed)})")
+
+pairs = []
+if changed:
+    try:
+        from PIL import Image
+        import numpy as np
+        have_pil = True
+    except Exception:
+        have_pil = False
+    for r in changed:
+        detail = ""
+        if have_pil:
+            try:
+                a, b = Image.open(O[r]), Image.open(N[r])
+                if a.size == b.size:
+                    A = np.asarray(a.convert('RGB'), dtype=np.int16)
+                    B = np.asarray(b.convert('RGB'), dtype=np.int16)
+                    d = np.abs(A - B).max(axis=2)
+                    pct = 100.0 * (d > 8).mean()
+                    detail = f"  {a.size[0]}x{a.size[1]}, {pct:.2f}% of pixels differ"
+                    pairs.append((r, O[r], N[r]))
+                else:
+                    detail = f"  {a.size[0]}x{a.size[1]} -> {b.size[0]}x{b.size[1]} (resized)"
+            except Exception as e:
+                detail = f"  (not a readable raster image: {type(e).__name__})"
+        so, sn = os.path.getsize(O[r]), os.path.getsize(N[r])
+        w(f"    ~ {r}")
+        w(f"        {so:,} B -> {sn:,} B{detail}")
+else:
+    w("    (none)")
+w("")
+w(f"IDENTICAL: {len(identical)}")
+
+if mkimages and pairs:
+    from PIL import Image
+    import numpy as np
+    dd = os.path.join(outdir, "figure-diffs")
+    os.makedirs(dd, exist_ok=True)
+    w("")
+    w("SIDE-BY-SIDE IMAGES")
+    for r, po, pn in pairs:
+        a = Image.open(po).convert('RGB'); b = Image.open(pn).convert('RGB')
+        A = np.asarray(a, dtype=np.int16); B = np.asarray(b, dtype=np.int16)
+        d = np.abs(A - B).max(axis=2).astype(np.uint8)
+        heat = np.zeros((*d.shape, 3), dtype=np.uint8)
+        heat[..., 0] = 255 - d          # differences show up red on white
+        heat[..., 1] = 255 - d
+        heat[..., 2] = 255 - d
+        heat[d > 8] = [220, 30, 30]
+        H = Image.fromarray(heat)
+        gap, W_, Ht = 12, a.width, a.height
+        canvas = Image.new('RGB', (W_ * 3 + gap * 2, Ht), 'white')
+        canvas.paste(a, (0, 0)); canvas.paste(b, (W_ + gap, 0)); canvas.paste(H, (2 * (W_ + gap), 0))
+        name = r.replace(os.sep, '__') + '.diff.png'
+        canvas.save(os.path.join(dd, name))
+        w(f"    {name}   (old | new | differences in red)")
+
+txt = "\n".join(lines)
+open(os.path.join(outdir, "figures-report.txt"), "w").write(txt + "\n")
+print(txt)
+
+# ---------------- bibliography ----------------
+def bibentries(root):
+    ents = {}
+    for dp, dirs, fs in os.walk(root):
+        dirs[:] = [d for d in dirs if d not in ('.git',)]
+        for f in fs:
+            if f.endswith('.bib'):
+                s = open(os.path.join(dp, f), encoding='utf-8', errors='replace').read()
+                for m in re.finditer(r'@(\w+)\s*\{\s*([^,\s]+)\s*,', s):
+                    start = m.start()
+                    depth, i = 0, s.index('{', start)
+                    j = i
+                    while j < len(s):
+                        if s[j] == '{': depth += 1
+                        elif s[j] == '}':
+                            depth -= 1
+                            if depth == 0: break
+                        j += 1
+                    ents[m.group(2)] = re.sub(r'\s+', ' ', s[start:j + 1]).strip()
+    return ents
+
+BO, BN = bibentries(old), bibentries(new)
+badd = sorted(set(BN) - set(BO)); brem = sorted(set(BO) - set(BN))
+bmod = sorted(k for k in set(BO) & set(BN) if BO[k] != BN[k])
+bl = ["BIBLIOGRAPHY REPORT", "=" * 60,
+      f"old entries: {len(BO)}    new entries: {len(BN)}", "",
+      f"ADDED    ({len(badd)})"] + [f"    + {k}" for k in badd] + \
+     ["", f"REMOVED  ({len(brem)})"] + [f"    - {k}" for k in brem] + \
+     ["", f"MODIFIED ({len(bmod)})"] + [f"    ~ {k}" for k in bmod]
+open(os.path.join(outdir, "bib-report.txt"), "w").write("\n".join(bl) + "\n")
+print()
+print(f"bibliography: +{len(badd)} added, -{len(brem)} removed, ~{len(bmod)} modified"
+      f"   (detail in bib-report.txt)")
+PYEOF
+
+# ======================= 3. table report =================================
+# latexdiff turns changes inside tabular into invisible %DIFDELCMD comments,
+# so table edits never reach diff.pdf. Report them separately.
+echo
+echo "==> comparing tables"
+"$PYTHON" - "$OLD" "$NEW" "$MAIN" "$OUTDIR" <<'PYTAB'
+import sys, os, re, difflib
+old, new, mainrel, outdir = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+
+def strip_comments(t):
+    out = []
+    for ln in t.split('\n'):
+        r, i = '', 0
+        while i < len(ln):
+            if ln[i] == '%' and (i == 0 or ln[i-1] != '\\'): break
+            r += ln[i]; i += 1
+        out.append(r)
+    return '\n'.join(out)
+
+def flatten(root, rel, depth=0):
+    """expand \\input/\\include exactly as latexdiff --flatten sees the document
+       (commented-out \\input lines are correctly skipped)"""
+    if depth > 12: return ''
+    p = os.path.join(root, rel if rel.endswith('.tex') else rel + '.tex')
+    if not os.path.isfile(p): return ''
+    t = strip_comments(open(p, encoding='utf-8', errors='replace').read())
+    return re.sub(r'\\(?:input|include)\s*\{([^}]+)\}',
+                  lambda m: flatten(root, m.group(1).strip(), depth + 1), t)
+
+def braced(s, start):
+    d, i = 0, start
+    while i < len(s):
+        if s[i] == '{': d += 1
+        elif s[i] == '}':
+            d -= 1
+            if d == 0: return s[start+1:i], i+1
+        i += 1
+    return '', start
+
+def field(body, cmd):
+    m = re.search(r'\\' + cmd + r'\*?\s*(?:\[[^\]]*\])?\s*\{', body)
+    return braced(body, m.end()-1)[0] if m else None
+
+TAB = re.compile(r'\\begin\{(table\*?|longtable\*?|sidewaystable\*?|deluxetable\*?)\}'
+                 r'(.*?)\\end\{\1\}', re.S)
+COLS = re.compile(r'\\begin\{(?:tabular\*?|tabularx|longtable)\}(?:\{[^{}]*\})?\s*\{')
+sq = lambda s: re.sub(r'\s+', ' ', s).strip()
+RULES = r'\\hline|\\toprule|\\midrule|\\bottomrule|\\cline\{[^}]*\}'
+
+def tables(root):
+    doc = flatten(root, mainrel); out = {}; n = 0
+    for m in TAB.finditer(doc):
+        body = m.group(2); n += 1
+        lab, cap = field(body, 'label'), field(body, 'caption')
+        cm = COLS.search(body)
+        if cm:
+            cols, idx = braced(body, cm.end()-1)
+            after = body[idx:]
+        else:
+            cols, after = '(none)', body
+        chunks = re.split(r'\\\\', after)
+        clean = lambda r: sq(re.sub(RULES, ' ', r))
+        header = clean(chunks[0]) if chunks else ''
+        data = [clean(c) for c in chunks[1:] if '&' in c]
+        key = lab
+        if not key and cap:
+            r = re.search(r'\\ref\{([^}]+)\}', cap)
+            key = f"{r.group(1)} (continued)" if r else sq(cap)[:40]
+        out[key or f"(unlabelled #{n})"] = dict(
+            caption=sq(cap) if cap else '(no caption)',
+            colspec=re.sub(r'\s+', '', cols), header=header, data=data, body=sq(body))
+    return out
+
+O, N = tables(old), tables(new)
+add = sorted(set(N) - set(O)); rem = sorted(set(O) - set(N))
+chg = sorted(k for k in set(O) & set(N) if O[k]['body'] != N[k]['body'])
+
+L = ["TABLE REPORT", "=" * 70,
+     "latexdiff cannot mark up changes inside tabular environments, because & and",
+     "\\\\ are alignment syntax -- deleted rows become invisible %DIFDELCMD comments.",
+     "Table changes therefore do NOT appear in diff.pdf, and are listed here.", "",
+     f"CHANGED ({len(chg)})"]
+for k in chg:
+    a, b = O[k], N[k]
+    L.append(f"    ~ {k}   \"{b['caption'][:60]}\"")
+    if a['colspec'] != b['colspec']:
+        L.append(f"        column spec :  {a['colspec']}")
+        L.append(f"                    -> {b['colspec']}")
+    if a['header'] != b['header']:
+        L.append(f"        header row  -  {a['header'][:160]}")
+        L.append(f"                    +  {b['header'][:160]}")
+    nd = sum(1 for x in difflib.unified_diff(a['data'], b['data'], lineterm='', n=0)
+             if x[:1] in '+-' and not x.startswith(('---', '+++')))
+    if len(a['data']) != len(b['data']):
+        L.append(f"        data rows   :  {len(a['data'])} -> {len(b['data'])}  ({nd} line changes)")
+    elif nd:
+        L.append(f"        data rows   :  {len(b['data'])} rows, {nd} line changes")
+if not chg: L.append("    (none)")
+L += ["", f"ADDED ({len(add)})"]
+for k in add:
+    L.append(f"    + {k}   \"{N[k]['caption'][:60]}\"  [{len(N[k]['data'])} data rows]")
+    if N[k]['header']: L.append(f"        header:  {N[k]['header'][:160]}")
+if not add: L.append("    (none)")
+L += ["", f"REMOVED ({len(rem)})"]
+for k in rem:
+    L.append(f"    - {k}   \"{O[k]['caption'][:60]}\"  [{len(O[k]['data'])} data rows]")
+if not rem: L.append("    (none)")
+
+txt = "\n".join(L)
+open(os.path.join(outdir, "tables-report.txt"), "w").write(txt + "\n")
+print(txt)
+if chg or add or rem:
+    print()
+    print("    ^ none of the above is visible in diff.pdf - check this report.")
+PYTAB
+
+echo
+echo "==> done. Results in $OUTDIR"
+[ -f "$OUTDIR/diff.pdf" ] && [ "$OPENPDF" -eq 1 ] && open "$OUTDIR/diff.pdf"
+exit 0

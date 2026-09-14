@@ -1,0 +1,21 @@
+# installer logs and the probe output they may leave behind
+logs/
+*.log
+*.log.probe
+*.log.profile
+
+# backups this tool makes before editing anything
+*.latex-tools-backup-*
+*.pre-uninstall-*
+
+# macOS / editors
+.DS_Store
+._*
+*.swp
+*~
+.vscode/
+.idea/
+
+# python
+__pycache__/
+*.pyc
