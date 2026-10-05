@@ -9,6 +9,32 @@ everything else installs regardless, and you can re-run the installer later.
 
 ---
 
+## Two ways to install
+
+**Everything** (TeX Live + VS Code + the tools) — for a brand-new machine:
+
+```bash
+./install.sh
+```
+
+**Just the two commands**, using the LaTeX you already have — if the machine
+already has MacTeX, TeX Live or a distro LaTeX and you only want `paperdiff`
+and `paperflat`:
+
+```bash
+./install.sh --tools-only
+```
+
+That touches nothing but `~/.local/bin`. It first checks your LaTeX can
+actually run them (`pdflatex`, `latexmk`, `latexdiff`, `bibtex`) and stops
+with a one-line explanation if it cannot. If your LaTeX is somewhere unusual:
+
+```bash
+./install.sh --tools-only --tex-path /usr/local/texlive/2025/bin/universal-darwin
+```
+
+---
+
 ## Install on a new laptop
 
 ```bash
@@ -143,6 +169,8 @@ This installer is built to be run on a machine you care about.
 --yes             never ask questions (unattended)
 --prefix DIR      where TeX Live goes            (default ~/texlive)
 --no-docs         skip package docs (smaller, but no `texdoc`)
+--tools-only      install only paperdiff and paperflat, using existing LaTeX
+--tex-path DIR    where your LaTeX is, if not found automatically
 --skip-texlive    don't touch TeX Live (e.g. you already have MacTeX)
 --skip-vscode     don't touch VS Code
 --skip-tools      don't install paperdiff
@@ -157,6 +185,8 @@ Everything is logged to `logs/install-<date>.log`.
 
 | Symptom | Fix |
 |---|---|
+| `No LaTeX found on this machine` | Point at it with `--tex-path DIR`, or run `./install.sh` to install TeX Live. |
+| `cannot run these tools / missing: latexdiff` | `tlmgr install latexdiff`, or `./install.sh` for a complete TeX Live. |
 | `paperdiff: command not found` | Open a **new** terminal. If it persists, `./verify.sh`. |
 | Download fails | It tries 7 CTAN mirrors in turn. If all fail it's your network/proxy. |
 | VS Code not found | Install VS Code, then `./install.sh --skip-texlive`. |
@@ -171,6 +201,13 @@ Everything is logged to `logs/install-<date>.log`.
 Tested on macOS (Apple Silicon). Written to work on Intel Macs and on Linux
 (x86-64 and ARM) too: the TeX Live platform, VS Code location, settings path
 and shell files are all detected at run time, nothing is hardcoded.
+
+`paperdiff` and `paperflat` locate LaTeX at run time with no hardcoded year or
+architecture: whatever is on `PATH` wins, then the path the installer recorded
+in `~/.config/latex-tools/config`, then the usual places
+(`~/texlive/*/bin/*`, `/usr/local/texlive/*/bin/*`, `/Library/TeX/texbin`,
+Homebrew, MacPorts). That last fallback is what makes them work when launched
+from Finder or VS Code, whose `PATH` often lacks TeX.
 
 The shell scripts are deliberately **bash 3.2 compatible**, because that is
 what macOS still ships — a script using associative arrays or `readarray`

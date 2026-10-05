@@ -113,6 +113,15 @@ else
   step "TeX Live"; skip "kept on request"
 fi
 
+# ---- recorded TeX path ---------------------------------------------------
+step "Recorded TeX path"
+for c in $(grep '^config|' "$MANIFEST" 2>/dev/null | cut -d'|' -f2 | sort -u); do
+  if [ ! -e "$c" ]; then skip "$c already gone"; continue; fi
+  if [ "$DRYRUN" = "1" ]; then info "[dry-run] would remove $c"; continue; fi
+  rm -f "$c" && ok "removed $c"
+  rmdir "$(dirname "$c")" 2>/dev/null
+done
+
 # ---- VS Code settings ----------------------------------------------------
 step "VS Code settings"
 info "Your settings.json was backed up before we touched it. To restore:"

@@ -90,8 +90,17 @@ for t in $(ls "$REPO_DIR/bin" 2>/dev/null); do
     chk_bad "$t is not installed"
   fi
 done
-# latexpand is what paperflat relies on
-if command -v latexpand >/dev/null 2>&1; then chk_ok "latexpand (needed by paperflat)"; else chk_bad "latexpand missing"; fi
+# what the two tools actually need at run time
+for t in latexdiff latexmk bibtex pdflatex; do
+  if command -v "$t" >/dev/null 2>&1; then chk_ok "$t (required by the tools)"
+  else chk_bad "$t is missing - the tools cannot run"; fi
+done
+CFG="${XDG_CONFIG_HOME:-$HOME/.config}/latex-tools/config"
+if [ -r "$CFG" ]; then
+  chk_ok "TeX path recorded for GUI launches: $(sed -n 's/^LATEX_TOOLS_TEXBIN=//p' "$CFG" | tr -d '\"')"
+else
+  chk_warn "no $CFG (fine if TeX is always on PATH)"
+fi
 
 PY=$(pick_python 2>/dev/null || true)
 if [ -n "$PY" ]; then

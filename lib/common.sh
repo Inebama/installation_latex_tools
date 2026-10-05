@@ -206,3 +206,80 @@ pick_python() {
   [ -n "$best" ] && { echo "$best"; return 0; }
   return 1
 }
+
+# ------------------------------------------------------- finding a TeX ------
+# What paperdiff and paperflat actually need at run time.
+LT_NEEDED="pdflatex latexmk latexdiff bibtex"
+
+# find_tex_bin — echo a directory containing pdflatex, or nothing.
+# Honours $TEX_PATH_OPT (the --tex-path option), which may be either the bin
+# directory itself or the root of a TeX installation. Year- and arch-agnostic.
+find_tex_bin() {
+  local d
+  if [ -n "${TEX_PATH_OPT:-}" ]; then
+    for d in "$TEX_PATH_OPT" "$TEX_PATH_OPT"/bin/* "$TEX_PATH_OPT"/*/bin/*; do
+      [ -n "$d" ] && [ -x "$d/pdflatex" ] && { echo "$d"; return 0; }
+    done
+    return 1
+  fi
+  if have pdflatex; then dirname "$(command -v pdflatex)"; return 0; fi
+  for d in "$HOME"/texlive/*/bin/* /usr/local/texlive/*/bin/* /opt/texlive/*/bin/* \
+           /Library/TeX/texbin /opt/homebrew/bin /usr/local/bin /opt/local/bin /usr/bin; do
+    [ -x "$d/pdflatex" ] && { echo "$d"; return 0; }
+  done
+  return 1
+}
+
+# tex_missing_tools BIN — echo the required commands that are NOT available.
+tex_missing_tools() {
+  local bin="$1" t miss=""
+  for t in $LT_NEEDED; do
+    if [ ! -x "$bin/$t" ] && ! have "$t"; then miss="$miss $t"; fi
+  done
+  echo "$miss" | sed 's/^ *//'
+}
+
+# Record the TeX location so the tools can find it even when launched from a
+# GUI (Finder, VS Code) whose PATH does not include it.
+write_tex_config() {
+  local bin="$1" cfgdir cfg
+  [ -n "$bin" ] || return 0
+  [ "$DRYRUN" = "1" ] && { info "[dry-run] would record the TeX path for the tools"; return 0; }
+  cfgdir="${XDG_CONFIG_HOME:-$HOME/.config}/latex-tools"
+  cfg="$cfgdir/config"
+  mkdir -p "$cfgdir" 2>/dev/null || return 0
+  if [ -f "$cfg" ] && grep -qF "LATEX_TOOLS_TEXBIN=\"$bin\"" "$cfg" 2>/dev/null; then
+    skip "TeX path already recorded for the tools"
+    return 0
+  fi
+  printf '# written by latex-tools on %s\nLATEX_TOOLS_TEXBIN="%s"\n' "$(date '+%Y-%m-%d')" "$bin" > "$cfg"
+  record "config|$cfg"
+  ok "recorded the TeX path for the tools ($cfg)"
+}
+
+# require_tex BIN — verify this TeX can actually run paperdiff/paperflat.
+# Returns 0 if usable. On failure prints a short, specific message - no essay.
+require_tex() {
+  local bin="$1" miss
+  if [ -z "$bin" ]; then
+    err "No LaTeX found on this machine."
+    info "paperdiff and paperflat need: $LT_NEEDED"
+    info ""
+    info "If you do have LaTeX, point at it:"
+    info "    ./install.sh --tools-only --tex-path /path/to/texlive/bin/<platform>"
+    info "Otherwise install everything (TeX Live included):"
+    info "    ./install.sh"
+    return 1
+  fi
+  miss=$(tex_missing_tools "$bin")
+  if [ -n "$miss" ]; then
+    err "The LaTeX at $bin cannot run these tools."
+    info "missing: $miss"
+    if [ -x "$bin/tlmgr" ]; then
+      info "Add them with:   $bin/tlmgr install$(echo " $miss" | sed 's/ pdflatex//;s/ bibtex//')"
+    fi
+    info "Or install a complete TeX Live:   ./install.sh"
+    return 1
+  fi
+  return 0
+}

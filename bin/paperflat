@@ -22,8 +22,25 @@
 
 set -uo pipefail
 
-TEXBIN="$HOME/texlive/2026/bin/universal-darwin"
-[ -d "$TEXBIN" ] && case ":$PATH:" in *":$TEXBIN:"*) ;; *) PATH="$PATH:$TEXBIN";; esac
+# --- find a TeX installation ------------------------------------------------
+# Deliberately year- and architecture-agnostic: this must work with
+# ~/texlive/<any year>/bin/<any platform>, MacTeX under /usr/local/texlive,
+# /Library/TeX/texbin, a Linux distro package, Homebrew or MacPorts.
+# Order: whatever is already on PATH wins; otherwise the path the installer
+# recorded; otherwise the usual places.
+_lt_conf="${XDG_CONFIG_HOME:-$HOME/.config}/latex-tools/config"
+[ -r "$_lt_conf" ] && . "$_lt_conf"
+if [ -n "${LATEX_TOOLS_TEXBIN:-}" ] && [ -x "${LATEX_TOOLS_TEXBIN}/pdflatex" ]; then
+  case ":$PATH:" in *":${LATEX_TOOLS_TEXBIN}:"*) ;; *) PATH="$PATH:${LATEX_TOOLS_TEXBIN}" ;; esac
+fi
+if ! command -v pdflatex >/dev/null 2>&1; then
+  for _d in "$HOME"/texlive/*/bin/* /usr/local/texlive/*/bin/* /opt/texlive/*/bin/* \
+            /Library/TeX/texbin /opt/homebrew/bin /usr/local/bin /opt/local/bin; do
+    [ -x "$_d/pdflatex" ] || continue
+    case ":$PATH:" in *":$_d:"*) ;; *) PATH="$PATH:$_d" ;; esac
+    break
+  done
+fi
 export PATH
 
 pick_python() {
