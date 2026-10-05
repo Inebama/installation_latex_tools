@@ -146,6 +146,9 @@ done
 detect_main() {
   local root="$1" f base hits=()
   while IFS= read -r f; do
+    case "$(basename "$f")" in
+      *-flat.tex|__flat__.tex|diff.tex) continue ;;   # our own previous output
+    esac
     grep -q '\\documentclass' "$f" 2>/dev/null || continue
     grep -q '\\begin{document}' "$f" 2>/dev/null && hits+=("$(basename "$f")")
   done < <(find "$root" -maxdepth 1 -name '*.tex' | sort)
