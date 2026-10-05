@@ -56,49 +56,57 @@ tlmgr install collection-langgerman
 
 ---
 
-## paperflat — one .tex for submission
+## paperflat — one .tex with all the writing
 
-A&A, MNRAS and others ask for a single source file. If your paper is split
-across `Sections/*.tex`, run this in the paper's folder:
+Journals and language editors often want a single source file. If your paper is
+split across `Sections/*.tex`, run this in the paper's folder:
 
 ```bash
 paperflat
 ```
 
-You get `<main>-flat.tex`: every `\input{}` expanded in place, the reference
-list inlined from the `.bbl`, comments stripped. Your own files are not touched.
+It replaces every `\input{}` between `\begin{document}` and `\end{document}`
+with the contents of that file, recursively — **and nothing else**:
 
-**It proves the result rather than assuming it.** The flattened file is
-compiled and compared with your original PDF page by page:
+* your comments are kept exactly as written
+* a commented-out `\input` stays a comment and is *not* expanded
+* the preamble and `\bibliography{}` are left alone
+* spacing and blank lines are untouched; included files appear verbatim
+
+Your own files are never modified; the result is `<main>-flat.tex`.
+
+**It proves the result rather than assuming it** — the flattened file is
+compiled and compared with your original PDF, page by page:
 
 ```
+    24 \input/\include expanded
+    1 commented-out \input left as comments (not expanded)
     flattened: 22 pages (original: 22)
     all 22 pages are textually IDENTICAL to the original
 ```
 
-If a single word moved, it says which page and shows the difference.
+If one word moved, it names the page and shows the difference.
 
-Useful options:
+Two opt-in extras, when you want a file that stands completely alone:
 
 ```bash
-paperflat --keep-comments        # keep your % comments
-paperflat --no-bbl               # leave \bibliography{} alone
-paperflat ~/Downloads/my_paper -o ~/Desktop/aa62334.tex
+paperflat --preamble      # expand \input{} in the preamble too
+paperflat --bbl           # inline the reference list from the .bbl
 ```
 
-Need the figures too? `--bundle` collects the style files and figures the paper
-*actually* uses — read from the `.fls` recorder of a real compile, so it is
-exactly what LaTeX read, with nothing unused tagging along:
+And if you also need the figures gathered, `--bundle` collects the figures and
+style files the paper *actually* uses — read from the `.fls` recorder of a real
+compile, so it is exactly what LaTeX read:
 
 ```bash
 paperflat --bundle --flat-figures --zip
 ```
 
-`--flat-figures` puts every figure in one directory and rewrites the
-`\includegraphics` paths, folding the folder into the filename. That matters:
-in a real paper, `Figures/apendix_stellar_params/Figure_1.png` and
-`Figures/appendix_data_software/cont_example/Figure_1.png` both exist — a naive
-flatten would silently destroy seven figures.
+`--flat-figures` puts every figure in one directory, folding the folder into
+each filename. That matters: in a real paper
+`Figures/apendix_stellar_params/Figure_1.png` and
+`Figures/appendix_data_software/cont_example/Figure_1.png` both exist, and a
+naive flatten would silently destroy seven figures.
 
 ---
 
