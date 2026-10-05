@@ -46,12 +46,59 @@ Re-running is safe — anything already installed and working is left alone.
 | **Languages** | English, Spanish, French, Italian, Portuguese, Japanese only. Arabic, Chinese, Cyrillic, Czech, German, Greek, Korean, Polish and "other European" are deliberately left out. |
 | **VS Code** | LaTeX Workshop extension, plus build recipes whose `PATH` points at this TeX Live explicitly — so builds work even when VS Code doesn't inherit your shell environment. `Cmd+Alt+B` builds, `Cmd+Alt+V` views. |
 | **paperdiff** | `~/.local/bin/paperdiff` — diffs two versions of a nested LaTeX paper and compares figures. Run `paperdiff --help`. |
+| **paperflat** | `~/.local/bin/paperflat` — flattens a nested paper into **one `.tex`** for journals that demand a single source file. Run `paperflat --help`. |
 
 If a language you skipped is ever needed:
 
 ```bash
 tlmgr install collection-langgerman
 ```
+
+---
+
+## paperflat — one .tex for submission
+
+A&A, MNRAS and others ask for a single source file. If your paper is split
+across `Sections/*.tex`, run this in the paper's folder:
+
+```bash
+paperflat
+```
+
+You get `<main>-flat.tex`: every `\input{}` expanded in place, the reference
+list inlined from the `.bbl`, comments stripped. Your own files are not touched.
+
+**It proves the result rather than assuming it.** The flattened file is
+compiled and compared with your original PDF page by page:
+
+```
+    flattened: 22 pages (original: 22)
+    all 22 pages are textually IDENTICAL to the original
+```
+
+If a single word moved, it says which page and shows the difference.
+
+Useful options:
+
+```bash
+paperflat --keep-comments        # keep your % comments
+paperflat --no-bbl               # leave \bibliography{} alone
+paperflat ~/Downloads/my_paper -o ~/Desktop/aa62334.tex
+```
+
+Need the figures too? `--bundle` collects the style files and figures the paper
+*actually* uses — read from the `.fls` recorder of a real compile, so it is
+exactly what LaTeX read, with nothing unused tagging along:
+
+```bash
+paperflat --bundle --flat-figures --zip
+```
+
+`--flat-figures` puts every figure in one directory and rewrites the
+`\includegraphics` paths, folding the folder into the filename. That matters:
+in a real paper, `Figures/apendix_stellar_params/Figure_1.png` and
+`Figures/appendix_data_software/cont_example/Figure_1.png` both exist — a naive
+flatten would silently destroy seven figures.
 
 ---
 

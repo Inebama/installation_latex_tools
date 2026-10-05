@@ -52,12 +52,18 @@ install_tools() {
     *) info "$TOOLS_DIR will be added to PATH by the shell block written earlier" ;;
   esac
 
-  if [ "$DRYRUN" != "1" ] && [ -x "$TOOLS_DIR/paperdiff" ]; then
-    if "$TOOLS_DIR/paperdiff" --help >/dev/null 2>&1; then
-      ok "paperdiff runs correctly"
-    else
-      warn "paperdiff was installed but did not run cleanly"
-    fi
+  # Smoke-test every tool we installed, not just one of them.
+  if [ "$DRYRUN" != "1" ]; then
+    for src in "$REPO_DIR"/bin/*; do
+      [ -f "$src" ] || continue
+      name=$(basename "$src")
+      [ -x "$TOOLS_DIR/$name" ] || continue
+      if "$TOOLS_DIR/$name" --help >/dev/null 2>&1; then
+        ok "$name runs correctly"
+      else
+        warn "$name was installed but did not run cleanly"
+      fi
+    done
   fi
   return 0
 }

@@ -79,15 +79,19 @@ EOF
 fi
 
 # ------------------------------------------------------------ paperdiff ----
-step "paperdiff"
-if command -v paperdiff >/dev/null 2>&1; then
-  chk_ok "on PATH: $(command -v paperdiff)"
-  if paperdiff --help >/dev/null 2>&1; then chk_ok "runs"; else chk_bad "does not run"; fi
-elif [ -x "$HOME/.local/bin/paperdiff" ]; then
-  chk_warn "installed at ~/.local/bin/paperdiff but NOT on PATH (open a new terminal)"
-else
-  chk_bad "paperdiff is not installed"
-fi
+step "Command-line tools"
+for t in $(ls "$REPO_DIR/bin" 2>/dev/null); do
+  if command -v "$t" >/dev/null 2>&1; then
+    chk_ok "$t on PATH: $(command -v "$t")"
+    if "$t" --help >/dev/null 2>&1; then chk_ok "$t runs"; else chk_bad "$t does not run"; fi
+  elif [ -x "$HOME/.local/bin/$t" ]; then
+    chk_warn "$t is installed but NOT on PATH (open a new terminal)"
+  else
+    chk_bad "$t is not installed"
+  fi
+done
+# latexpand is what paperflat relies on
+if command -v latexpand >/dev/null 2>&1; then chk_ok "latexpand (needed by paperflat)"; else chk_bad "latexpand missing"; fi
 
 PY=$(pick_python 2>/dev/null || true)
 if [ -n "$PY" ]; then

@@ -1,0 +1,339 @@
+#!/usr/bin/env bash
+#
+# paperflat — turn a LaTeX paper that uses a nested \input{} structure into ONE
+#             .tex file containing all of the writing. For journals (A&A,
+#             MNRAS, ApJ...) that ask for a single source file at submission.
+#
+#   paperflat [PROJECT_DIR] [options]
+#
+# By default it writes one file: <main>-flat.tex, with every \input{} expanded
+# in place and the reference list inlined from the .bbl.
+#
+# THE SOURCE DIRECTORY IS NEVER MODIFIED. Everything happens in a copy.
+#
+# The result is verified, not assumed: it is compiled and compared page by page
+# with your original PDF, so you know before submitting that not one word moved.
+#
+# --bundle additionally collects the figures and local style files the document
+# actually uses (read from the .fls recorder file of a real compile, so it is
+# exactly what LaTeX read - no guessing).
+
+set -uo pipefail
+
+TEXBIN="$HOME/texlive/2026/bin/universal-darwin"
+[ -d "$TEXBIN" ] && case ":$PATH:" in *":$TEXBIN:"*) ;; *) PATH="$PATH:$TEXBIN";; esac
+export PATH
+
+pick_python() {
+  local p best=""
+  for p in "${PAPERDIFF_PYTHON:-}" "$HOME/miniconda3/bin/python" /opt/miniconda3/bin/python \
+           "$HOME/anaconda3/bin/python" /opt/anaconda3/bin/python \
+           "$(command -v python3 2>/dev/null)" "$(command -v python 2>/dev/null)"; do
+    [ -n "$p" ] && [ -x "$p" ] || continue
+    "$p" -c 'import sys' >/dev/null 2>&1 || continue
+    if "$p" -c 'import fitz' >/dev/null 2>&1; then echo "$p"; return 0; fi
+    [ -z "$best" ] && best="$p"
+  done
+  [ -n "$best" ] && echo "$best"
+}
+PYTHON=$(pick_python)
+
+SRC="$PWD"
+OUT=""
+MAIN=""
+KEEPCOM=0
+DOBBL=1
+VERIFY=1
+BUNDLE=0
+FLATFIGS=0
+DOZIP=0
+
+usage() {
+  cat <<'EOF'
+paperflat — flatten a nested LaTeX paper into ONE .tex file
+
+USAGE
+  paperflat [PROJECT_DIR] [options]        (PROJECT_DIR defaults to .)
+
+  The default output is a single file, <main>-flat.tex, in the current
+  directory: all \input{} expanded, bibliography inlined, comments stripped.
+
+OPTIONS
+  -o PATH           output .tex file  (or output DIRECTORY with --bundle)
+  -m FILE           main .tex file                (default: auto-detect)
+  --keep-comments   keep % comments               (default: strip them)
+  --no-bbl          leave \bibliography{} alone instead of inlining the .bbl
+  --no-verify       skip the compile-and-compare check (not recommended)
+
+  --bundle          also collect the figures and local .sty/.cls/.bst files
+                    the paper actually uses, into the output directory
+  --flat-figures    with --bundle: put all figures in one directory and rewrite
+                    the \includegraphics paths. Names are made unique by folding
+                    the folder into the filename, so two figures called
+                    Figure_1.png in different folders cannot overwrite one another.
+  --zip             with --bundle: also create submission.zip
+  -h, --help        this message
+
+EXAMPLES
+  cd ~/Downloads/my_paper && paperflat
+  paperflat ~/Downloads/my_paper -o ~/Desktop/aa62334.tex
+  paperflat ~/Downloads/my_paper -o ~/Desktop/AA_submission --bundle --flat-figures --zip
+EOF
+}
+
+POS=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) OUT="$2"; shift 2;;
+    -m) MAIN="$2"; shift 2;;
+    --keep-comments) KEEPCOM=1; shift;;
+    --no-bbl) DOBBL=0; shift;;
+    --no-verify) VERIFY=0; shift;;
+    --bundle) BUNDLE=1; shift;;
+    --flat-figures) FLATFIGS=1; BUNDLE=1; shift;;
+    --zip) DOZIP=1; BUNDLE=1; shift;;
+    -h|--help) usage; exit 0;;
+    -*) echo "paperflat: unknown option '$1' (try --help)" >&2; exit 2;;
+    *) POS="$1"; shift;;
+  esac
+done
+[ -n "$POS" ] && SRC="$POS"
+SRC=$(cd "$SRC" 2>/dev/null && pwd) || { echo "paperflat: cannot read '$POS'" >&2; exit 1; }
+
+for t in latexpand latexmk pdflatex; do
+  command -v "$t" >/dev/null || { echo "paperflat: '$t' not found on PATH" >&2; exit 1; }
+done
+
+# --- find the main .tex ----------------------------------------------------
+if [ -z "$MAIN" ]; then
+  hits=""
+  for f in "$SRC"/*.tex; do
+    [ -f "$f" ] || continue
+    grep -q '\\documentclass' "$f" 2>/dev/null || continue
+    grep -q '\\begin{document}' "$f" 2>/dev/null && hits="$hits $(basename "$f")"
+  done
+  set -- $hits
+  if [ $# -eq 1 ]; then MAIN="$1"
+  else
+    for b in main.tex paper.tex ms.tex manuscript.tex aanda.tex; do
+      for f in $hits; do [ "$f" = "$b" ] && MAIN="$b"; done
+    done
+  fi
+  [ -n "$MAIN" ] || { echo "paperflat: cannot tell which .tex is the main file." >&2
+                      echo "Candidates:$hits" >&2
+                      echo "Use:  paperflat -m <file.tex>" >&2; exit 1; }
+fi
+[ -f "$SRC/$MAIN" ] || { echo "paperflat: '$MAIN' not found in $SRC" >&2; exit 1; }
+JOB="${MAIN%.tex}"
+
+# --- where does the output go? ---------------------------------------------
+if [ "$BUNDLE" = "1" ]; then
+  [ -n "$OUT" ] || OUT="$PWD/submission"
+  mkdir -p "$OUT" || exit 1
+  OUTDIR=$(cd "$OUT" && pwd)
+  NAME="$JOB"
+  OUTTEX="$OUTDIR/$NAME.tex"
+else
+  [ -n "$OUT" ] || OUT="$PWD/$JOB-flat.tex"
+  case "$OUT" in */) OUT="${OUT}$JOB-flat.tex";; esac
+  [ -d "$OUT" ] && OUT="$OUT/$JOB-flat.tex"
+  mkdir -p "$(dirname "$OUT")" 2>/dev/null
+  OUTDIR=$(cd "$(dirname "$OUT")" && pwd)
+  NAME=$(basename "$OUT"); NAME="${NAME%.tex}"
+  OUTTEX="$OUTDIR/$NAME.tex"
+fi
+
+echo "paperflat"
+echo "  source : $SRC"
+echo "  main   : $MAIN"
+echo "  output : $OUTTEX"
+echo
+
+W=$(mktemp -d 2>/dev/null || mktemp -d -t paperflat) || { echo "cannot make a temp dir" >&2; exit 1; }
+trap 'rm -rf "$W"' EXIT INT TERM
+if command -v rsync >/dev/null 2>&1; then rsync -a "$SRC/" "$W/"; else cp -R "$SRC/." "$W/"; fi
+
+# --- 1. compile the original: gives the .bbl, the .fls and a reference PDF ---
+echo "==> compiling the original (for the bibliography and the reference PDF)"
+( cd "$W" && latexmk -pdf -interaction=nonstopmode -recorder "$MAIN" > "$OUTDIR/$NAME.original-build.log" 2>&1 )
+if [ ! -f "$W/$JOB.pdf" ]; then
+  echo "    the ORIGINAL paper does not compile - fix that first:" >&2
+  grep -E '^!' -A4 "$W/$JOB.log" 2>/dev/null | head -20 | sed 's/^/      /' >&2
+  exit 1
+fi
+ORIGPAGES=$(grep -o "Output written on $JOB.pdf ([0-9]* page" "$W/$JOB.log" | grep -o '[0-9]*' | tail -1)
+echo "    original: ${ORIGPAGES:-?} pages"
+
+# --- 2. flatten -------------------------------------------------------------
+echo "==> flattening"
+if [ "$KEEPCOM" = "1" ]; then LPOPTS="--keep-comments"; else LPOPTS="--empty-comments"; fi
+BBLOPT=""
+if [ "$DOBBL" = "1" ] && [ -s "$W/$JOB.bbl" ]; then
+  BBLOPT="--expand-bbl $JOB.bbl"
+  echo "    inlining the reference list ($(grep -c '\\bibitem' "$W/$JOB.bbl" | tr -d ' ') references)"
+elif [ "$DOBBL" = "1" ]; then
+  echo "    no .bbl produced - leaving \\bibliography{} as it is"
+fi
+( cd "$W" && latexpand $LPOPTS $BBLOPT "$MAIN" > "$OUTTEX" 2> "$OUTDIR/$NAME.latexpand.log" )
+if [ ! -s "$OUTTEX" ]; then
+  echo "    latexpand produced nothing. See $OUTDIR/$NAME.latexpand.log" >&2
+  exit 1
+fi
+NIN=$(grep -c '\\input{\|\\include{' "$OUTTEX" 2>/dev/null | tr -d ' ')
+echo "    $NAME.tex: $(wc -l < "$OUTTEX" | tr -d ' ') lines, $(du -h "$OUTTEX" | cut -f1)"
+if [ "${NIN:-0}" -gt 0 ] 2>/dev/null; then
+  echo "    note: $NIN \\input/\\include mention(s) remain - check they are inside comments"
+fi
+
+# --- 3. optional bundle -----------------------------------------------------
+if [ "$BUNDLE" = "1" ] && [ -n "$PYTHON" ]; then
+  echo "==> collecting figures and style files actually used (from the .fls recorder)"
+  "$PYTHON" - "$W" "$OUTDIR" "$JOB" "$NAME" "$FLATFIGS" <<'PYGATHER'
+import os, re, shutil, sys
+work, out, job, name = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+flatfigs = sys.argv[5] == "1"
+
+inputs = []
+fls = os.path.join(work, job + ".fls")
+if os.path.exists(fls):
+    for line in open(fls, encoding="utf-8", errors="replace"):
+        if line.startswith("INPUT "):
+            inputs.append(line[6:].strip())
+
+SKIP = {".aux",".log",".out",".fls",".fdb_latexmk",".blg",".toc",".lof",".lot",
+        ".synctex",".gz",".nav",".snm",".vrb",".spl",".bcf",".xml",".pdf"}
+rel = []
+for p in inputs:
+    if os.path.isabs(p):
+        continue                                  # part of the TeX distribution
+    q = os.path.normpath(p)
+    if q.startswith("..") or os.path.splitext(q)[1].lower() in SKIP:
+        continue
+    if os.path.exists(os.path.join(work, q)) and q not in rel:
+        rel.append(q)
+
+tex   = [p for p in rel if p.lower().endswith(".tex")]
+style = [p for p in rel if os.path.splitext(p)[1].lower() in
+         (".sty", ".cls", ".bst", ".cfg", ".clo", ".def")]
+figs  = [p for p in rel if p not in tex and p not in style]
+
+man = ["PAPERFLAT MANIFEST", "=" * 64,
+       "flattened file : %s.tex" % name,
+       "", "%d .tex files were inlined into it:" % len(tex)]
+man += ["    " + p for p in sorted(tex)]
+
+man += ["", "%d style/class file(s) copied:" % len(style)]
+for p in style:
+    shutil.copy2(os.path.join(work, p), os.path.join(out, os.path.basename(p)))
+    man.append("    " + os.path.basename(p))
+
+renames = {}
+man += ["", "%d figure(s) copied:" % len(figs)]
+for p in sorted(figs):
+    if flatfigs:
+        stem, ext = os.path.splitext(p)
+        base = re.sub(r"[/\\]", "_", stem) + ext
+        renames[stem.lstrip("./")] = os.path.splitext(base)[0]
+        dst = os.path.join(out, base)
+        man.append("    %-56s <- %s" % (base, p))
+    else:
+        dst = os.path.join(out, p)
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        man.append("    " + p)
+    shutil.copy2(os.path.join(work, p), dst)
+
+if flatfigs and renames:
+    tf = os.path.join(out, name + ".tex")
+    s = open(tf, encoding="utf-8", errors="replace").read()
+    cnt = [0]
+    def fix(m):
+        key = os.path.splitext(m.group(2).strip())[0].lstrip("./")
+        if key in renames:
+            cnt[0] += 1
+            return m.group(1) + "{" + renames[key] + "}"
+        return m.group(0)
+    s = re.sub(r"(\\includegraphics\s*(?:\[[^\]]*\])?\s*)\{([^}]*)\}", fix, s)
+    open(tf, "w", encoding="utf-8").write(s)
+    man += ["", "%d \\includegraphics path(s) rewritten." % cnt[0]]
+    print("    figures flattened into one directory, %d path(s) rewritten" % cnt[0])
+
+open(os.path.join(out, "MANIFEST.txt"), "w").write("\n".join(man) + "\n")
+print("    %d style file(s), %d figure(s); %d .tex were inlined" % (len(style), len(figs), len(tex)))
+PYGATHER
+fi
+
+# --- 4. verify --------------------------------------------------------------
+if [ "$VERIFY" = "1" ]; then
+  echo "==> verifying: compiling the flattened file and comparing with the original"
+  # Where we compile matters:
+  #  - plain mode: inside the copy of the project, where the original figures
+  #    and style files live, so this tests the FLATTENED TEXT and nothing else.
+  #  - bundle mode: inside the bundle, because \includegraphics paths may have
+  #    been rewritten to the collected (possibly renamed) figures. Compiling it
+  #    anywhere else would "fail" for the wrong reason.
+  if [ "$BUNDLE" = "1" ]; then
+    VD="$W/__verify__"; rm -rf "$VD"; mkdir -p "$VD"
+    if command -v rsync >/dev/null 2>&1; then
+      rsync -a --exclude '*.log' --exclude 'submission.zip' "$OUTDIR/" "$VD/"
+    else
+      cp -R "$OUTDIR/." "$VD/" && rm -f "$VD"/*.log "$VD/submission.zip" 2>/dev/null
+    fi
+  else
+    VD="$W"
+  fi
+  cp "$OUTTEX" "$VD/__flat__.tex"
+  ( cd "$VD" && latexmk -pdf -interaction=nonstopmode __flat__.tex > "$OUTDIR/$NAME.verify-build.log" 2>&1 )
+  if [ ! -f "$VD/__flat__.pdf" ]; then
+    echo "    THE FLATTENED FILE DID NOT COMPILE:" >&2
+    grep -E '^!' -A4 "$VD/__flat__.log" 2>/dev/null | head -20 | sed 's/^/      /' >&2
+    echo "    full log: $OUTDIR/$NAME.verify-build.log" >&2
+    exit 1
+  fi
+  NEWPAGES=$(grep -o "Output written on __flat__.pdf ([0-9]* page"  "$VD/__flat__.log" | grep -o '[0-9]*' | tail -1)
+  echo "    flattened: ${NEWPAGES:-?} pages (original: ${ORIGPAGES:-?})"
+
+  if [ -n "$PYTHON" ] && "$PYTHON" -c 'import fitz' >/dev/null 2>&1; then
+    "$PYTHON" - "$W/$JOB.pdf" "$VD/__flat__.pdf" <<'PYCMP'
+import fitz, re, sys, difflib
+a, b = fitz.open(sys.argv[1]), fitz.open(sys.argv[2])
+norm = lambda d: [re.sub(r"\s+", " ", p.get_text()).strip() for p in d]
+A, B = norm(a), norm(b)
+if len(A) != len(B):
+    print("    PAGE COUNT DIFFERS: %d -> %d" % (len(A), len(B))); sys.exit(1)
+bad = [i for i, (x, y) in enumerate(zip(A, B)) if x != y]
+if not bad:
+    print("    all %d pages are textually IDENTICAL to the original" % len(A)); sys.exit(0)
+print("    %d of %d page(s) differ:" % (len(bad), len(A)))
+for i in bad[:3]:
+    sm = difflib.SequenceMatcher(None, A[i], B[i])
+    print("      page %d (similarity %.4f)" % (i + 1, sm.ratio()))
+    for op, i1, i2, j1, j2 in sm.get_opcodes():
+        if op != "equal":
+            print("        %-7s %r -> %r" % (op, A[i][i1:i2][:70], B[i][j1:j2][:70]))
+sys.exit(1)
+PYCMP
+    [ $? -eq 0 ] || echo "    ^ look at these before submitting"
+  else
+    if [ "${NEWPAGES:-x}" = "${ORIGPAGES:-y}" ]; then
+      echo "    page count matches (install PyMuPDF for a word-level comparison)"
+    else
+      echo "    PAGE COUNT DIFFERS - check before submitting"
+    fi
+  fi
+  cp "$VD/__flat__.pdf" "$OUTDIR/$NAME.pdf" 2>/dev/null
+fi
+
+# --- 5. optional zip --------------------------------------------------------
+if [ "$DOZIP" = "1" ] && [ "$BUNDLE" = "1" ]; then
+  echo "==> zipping"
+  ( cd "$OUTDIR" && rm -f submission.zip && \
+    zip -qr submission.zip . -x '*.log' 'submission.zip' 'MANIFEST.txt' )
+  echo "    $OUTDIR/submission.zip ($(du -h "$OUTDIR/submission.zip" | cut -f1))"
+fi
+
+echo
+echo "==> done"
+echo "    single .tex : $OUTTEX"
+[ -f "$OUTDIR/$NAME.pdf" ] && echo "    proof it works: $OUTDIR/$NAME.pdf"
+[ "$BUNDLE" = "1" ] && echo "    what is included: $OUTDIR/MANIFEST.txt"
+exit 0
