@@ -1,8 +1,10 @@
 # latex-tools
 
 Set up a complete LaTeX working environment on a new Mac or Linux machine with
-one command: TeX Live, VS Code's LaTeX Workshop wired to it, and `paperdiff`
-for comparing two versions of a paper.
+one command: TeX Live, VS Code's LaTeX Workshop wired to it, and two commands
+for writing papers — **`paperdiff`**, which shows what changed between two
+versions, and **`paperflat`**, which puts all the writing into a single `.tex`
+for journal submission.
 
 **The only thing you need beforehand is VS Code** — and even that is optional;
 everything else installs regardless, and you can re-run the installer later.
@@ -71,14 +73,88 @@ Re-running is safe — anything already installed and working is left alone.
 | **TeX Live** | `~/texlive/<year>`, installed **without `sudo`**. Every package (all 29 non-language collections: latexextra, fontsextra, mathscience, publishers, pstricks, bibtexextra, luatex, xetex, ConTeXt…) plus documentation, so `texdoc siunitx` works offline. |
 | **Languages** | English, Spanish, French, Italian, Portuguese, Japanese only. Arabic, Chinese, Cyrillic, Czech, German, Greek, Korean, Polish and "other European" are deliberately left out. |
 | **VS Code** | LaTeX Workshop extension, plus build recipes whose `PATH` points at this TeX Live explicitly — so builds work even when VS Code doesn't inherit your shell environment. `Cmd+Alt+B` builds, `Cmd+Alt+V` views. |
-| **paperdiff** | `~/.local/bin/paperdiff` — diffs two versions of a nested LaTeX paper and compares figures. Run `paperdiff --help`. |
-| **paperflat** | `~/.local/bin/paperflat` — flattens a nested paper into **one `.tex`** for journals that demand a single source file. Run `paperflat --help`. |
+| **paperdiff** | `~/.local/bin/paperdiff` — shows what changed between two versions of a paper: text, references, figures and tables. [Details below](#paperdiff--what-changed-between-two-versions). |
+| **paperflat** | `~/.local/bin/paperflat` — puts all the writing into **one `.tex`** for journals that demand a single source file. [Details below](#paperflat--one-tex-with-all-the-writing). |
 
 If a language you skipped is ever needed:
 
 ```bash
 tlmgr install collection-langgerman
 ```
+
+---
+
+## paperdiff — what changed between two versions
+
+Point it at two copies of the paper, oldest first:
+
+```bash
+paperdiff ~/Downloads/paper_submitted ~/Downloads/paper_current
+```
+
+About 30 s later you have `./paperdiff-out/` containing `diff.pdf`: your paper
+with **added or replaced text in green (`#00CF39`)** and **deleted text struck
+through in red**. It handles a nested `\input{}` layout without touching your
+files, and neither source directory is ever modified.
+
+### What it compares
+
+| | |
+|---|---|
+| **Text** | Word-level, through the whole paper including appendices. |
+| **References** | It builds each version's `.bbl` first, so the reference list itself is marked up — new entries in green, and an entry that changed (say `arXiv:2506.11278` → `A&A, 700, A213`) shown both ways. Skip with `--no-bib` if you want speed. |
+| **Figures** | `figures-report.txt`: added, removed, modified. Changed images get per-pixel statistics; `--images` writes `old \| new \| red heat-map` composites to `figure-diffs/`. |
+| **Tables** | `tables-report.txt` — see the warning below. |
+
+### Read `tables-report.txt`, always
+
+`latexdiff` **cannot mark up changes inside a `tabular`**, because `&` and `\\`
+are alignment syntax — it turns deleted table rows into invisible
+`%DIFDELCMD` comments, so the old table vanishes from the PDF and the new one
+appears unmarked, with nothing to tell you it changed.
+
+So `paperdiff` compares tables itself and writes them to a separate file,
+pairing tables by `\label` and reporting the column spec, the header row and
+the row count:
+
+```
+~ tab:targets   "Targets main parameters."
+    header row  -  N & Star ID & RA (deg) & DEC (deg) & $I_0$ [mag] & ...
+                +  N & Star ID & PoP & Class & $I_0$ [mag] & ...
+    data rows   :  56 rows, 112 line changes
+```
+
+The console prints `^ none of the above is visible in diff.pdf` when this
+applies, so you cannot miss it. **The PDF alone is complete for prose and
+references, but silently incomplete for tables.**
+
+### Colours
+
+```bash
+paperdiff old new --new-color teal --old-color 'B00020'
+```
+
+Any 6-digit hex (`00CF39`, `'#00CF39'` — quote it, `#` starts a comment in
+bash), 3-digit shorthand, one of xcolor's 19 names, or a blend like `red!60`.
+An unusable colour stops the run immediately with the valid options listed,
+rather than failing deep inside a LaTeX log.
+
+Green is the default for additions because `latexdiff`'s own blue is the same
+blue as A&A citation links, which makes new text and references impossible to
+tell apart.
+
+### Other options
+
+```bash
+paperdiff old new --figures-only          # skip the LaTeX diff (~1 s)
+paperdiff old new --images --open         # figure composites, then open the PDF
+paperdiff old new -o ~/Desktop/referee    # choose the output directory
+paperdiff old new -m paper.tex            # if the main file can't be guessed
+```
+
+If the diff fails to compile — almost always a table or an equation — try
+`--math whole`, then `--ld --disable-citation-markup`. Those are the two usual
+`latexdiff` culprits, and the script prints that hint on failure.
 
 ---
 
@@ -188,6 +264,8 @@ Everything is logged to `logs/install-<date>.log`.
 | `No LaTeX found on this machine` | Point at it with `--tex-path DIR`, or run `./install.sh` to install TeX Live. |
 | `cannot run these tools / missing: latexdiff` | `tlmgr install latexdiff`, or `./install.sh` for a complete TeX Live. |
 | `paperdiff: command not found` | Open a **new** terminal. If it persists, `./verify.sh`. |
+| A table changed but the diff PDF doesn't show it | Expected — `latexdiff` cannot mark up `tabular`. Read `tables-report.txt`. |
+| The diff PDF fails to compile | `--math whole`, then `--ld --disable-citation-markup`. |
 | Download fails | It tries 7 CTAN mirrors in turn. If all fail it's your network/proxy. |
 | VS Code not found | Install VS Code, then `./install.sh --skip-texlive`. |
 | Builds work in the terminal but not in VS Code | `./install.sh --skip-texlive` rewrites the recipes with the correct path. |
@@ -222,7 +300,8 @@ install.sh          main installer
 Install.command     double-clickable wrapper for Finder
 verify.sh           read-only health check
 uninstall.sh        undo, using the manifest
-bin/paperdiff       the paper-diffing tool
+bin/paperdiff       show what changed between two versions of a paper
+bin/paperflat       put all the writing into one .tex
 lib/common.sh       logging, detection, downloads, backups
 lib/10-texlive.sh   TeX Live
 lib/20-vscode.sh    extension + settings merge
